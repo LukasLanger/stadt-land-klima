@@ -12,11 +12,11 @@ meta:
   interface: input-multiline
   note: null
   options:
-    softLength: 500
+    softLength: 1500
     trim: true
   readonly: false
   required: false
-  sort: 15
+  sort: 14
   special: null
   translations:
     - language: de-DE
