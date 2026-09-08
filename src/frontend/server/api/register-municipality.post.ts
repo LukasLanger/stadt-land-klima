@@ -5,6 +5,140 @@ type RegistrationSteps = Record<RegistrationStepKey, boolean> & {
   notify: boolean;
   welcome: boolean;
 };
+type DirectusRoleValue = string | { id?: string | null } | null | undefined;
+
+function roleId(value: DirectusRoleValue): string | null {
+  if (typeof value === 'string') return value;
+  return value?.id ?? null;
+}
+
+async function ensureUserRole(
+  directusUrl: string,
+  headers: Record<string, string>,
+  userId: string,
+  expectedRoleId: string,
+): Promise<void> {
+  const readRoleId = async (): Promise<string | null> => {
+    const result = await $fetch<{ data?: { role?: DirectusRoleValue } }>(
+      `${directusUrl}/users/${userId}`,
+      { headers, params: { 'fields[]': ['id', 'role'] } },
+    );
+    return roleId(result.data?.role);
+  };
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    if (await readRoleId() === expectedRoleId) return;
+
+    await $fetch(`${directusUrl}/users/${userId}`, {
+      method: 'PATCH',
+      headers,
+      body: { role: expectedRoleId },
+    });
+
+    if (await readRoleId() === expectedRoleId) return;
+    await new Promise<void>((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
+  }
+
+  throw new Error(`Directus did not persist role ${expectedRoleId} for user ${userId}`);
+}
+
+async function deleteUserAfterFailedRegistration(
+  directusUrl: string,
+  headers: Record<string, string>,
+  userId: string | null,
+): Promise<void> {
+  if (!userId) return;
+
+  try {
+    await $fetch(`${directusUrl}/users/${userId}`, { method: 'DELETE', headers });
+  } catch (cleanupError) {
+    console.error('[register-municipality] Failed to clean up incomplete user:', cleanupError);
+  }
+}
+
+async function deleteLocalteamAfterFailedRegistration(
+  directusUrl: string,
+  headers: Record<string, string>,
+  localteamId: string,
+): Promise<void> {
+  try {
+    const junctions = await $fetch<{ data?: Array<{ id: string }> }>(
+      `${directusUrl}/items/junction_directus_users_localteams`,
+      {
+        headers,
+        params: {
+          'filter[localteam_id][_eq]': localteamId,
+          'fields[]': 'id',
+          limit: -1,
+        },
+      },
+    );
+    for (const junction of junctions.data ?? []) {
+      await $fetch(`${directusUrl}/items/junction_directus_users_localteams/${junction.id}`, {
+        method: 'DELETE',
+        headers,
+      });
+    }
+  } catch (cleanupError) {
+    console.error('[register-municipality] Failed to clean up incomplete localteam links:', cleanupError);
+  }
+
+  try {
+    await $fetch(`${directusUrl}/items/localteams/${localteamId}`, { method: 'DELETE', headers });
+  } catch (cleanupError) {
+    console.error('[register-municipality] Failed to clean up incomplete localteam:', cleanupError);
+  }
+}
+
+async function ensureLocalteamUserJunction(
+  directusUrl: string,
+  headers: Record<string, string>,
+  userId: string,
+  localteamId: string,
+): Promise<void> {
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      await $fetch(`${directusUrl}/items/junction_directus_users_localteams`, {
+        method: 'POST',
+        headers,
+        body: {
+          directus_users_id: userId,
+          localteam_id: localteamId,
+        },
+      });
+    } catch (error) {
+      lastError = error;
+    }
+
+    try {
+      const junctions = await $fetch<{ data?: Array<{ id: string }> }>(
+        `${directusUrl}/items/junction_directus_users_localteams`,
+        {
+          headers,
+          params: {
+            'filter[directus_users_id][_eq]': userId,
+            'filter[localteam_id][_eq]': localteamId,
+            'fields[]': 'id',
+            limit: 1,
+          },
+        },
+      );
+      if (junctions.data?.length) return;
+    } catch (error) {
+      lastError = error;
+    }
+
+    if (attempt < 2) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
+    }
+  }
+
+  throw lastError instanceof Error
+    ? lastError
+    : new Error('Directus did not persist the user/localteam junction');
+}
 
 function registrationErrorData(
   steps: RegistrationSteps,
@@ -160,7 +294,7 @@ export default defineEventHandler(async (event) => {
     );
   }
 
-  let userId: string;
+  let userId: string | null = null;
   try {
     const userResult = await $fetch<{ data: { id: string } }>(`${directusUrl}/users`, {
       method: 'POST',
@@ -177,8 +311,10 @@ export default defineEventHandler(async (event) => {
       },
     });
     userId = userResult.data.id;
+    await ensureUserRole(directusUrl, headers, userId, LOKALTEAM_ADMIN_ROLE);
     steps.user = true;
   } catch (err: any) {
+    await deleteUserAfterFailedRegistration(directusUrl, headers, userId);
     const isUnique = isDuplicateEmailError(err);
     throw createRegistrationError(
       422,
@@ -207,8 +343,8 @@ export default defineEventHandler(async (event) => {
       },
     });
     localteamId = teamResult.data.id;
-    steps.team = true;
   } catch (err: any) {
+    await deleteUserAfterFailedRegistration(directusUrl, headers, userId);
     throw createRegistrationError(
       422,
       'Lokalteam konnte nicht angelegt werden. Bitte versuche es später erneut.',
@@ -220,17 +356,17 @@ export default defineEventHandler(async (event) => {
   // AdminLokalteam permissions use $CURRENT_USER.localteams.localteam_id (M2M traversal),
   // so without this junction row the user has no access to their localteam or municipality.
   try {
-    await $fetch(`${directusUrl}/items/junction_directus_users_localteams`, {
-      method: 'POST',
-      headers,
-      body: {
-        directus_users_id: userId,
-        localteam_id: localteamId,
-      },
-    });
+    await ensureLocalteamUserJunction(directusUrl, headers, userId, localteamId);
+    steps.team = true;
   } catch (err) {
-    // Non-fatal: log clearly but don't block — user + team are created
-    console.error('[register-municipality] Failed to create M2M junction entry (user will lack permissions):', err);
+    console.error('[register-municipality] Failed to create or verify M2M junction entry:', err);
+    await deleteLocalteamAfterFailedRegistration(directusUrl, headers, localteamId);
+    await deleteUserAfterFailedRegistration(directusUrl, headers, userId);
+    throw createRegistrationError(
+      503,
+      'Registrierung ist momentan nicht verfügbar. Bitte versuche es später erneut.',
+      registrationErrorData(steps, 'team', 'localteam.register.error.localteam_create_failed'),
+    );
   }
 
   // --- Step 3: Update municipality (best-effort, non-fatal) ---

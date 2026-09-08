@@ -151,6 +151,10 @@ Ensure you obey common coding standards and do not reinvent the wheel for every 
 15. DO NOT write plain text into the frontend. Instead, create translation keys and corresponding translations for german, english and italian.
 16. In German user-facing text and translations, use proper German characters (`ä`, `ö`, `ü`, `ß`) instead of ASCII transliterations (`ae`, `oe`, `ue`, `ss`). Keep ASCII transliterations only for stable identifiers, enum values, slugs, emails, URLs, or other machine-facing keys.
 
+## Feature inventory maintenance
+
+FEATURES.md is the canonical inventory of application functionality and its regression coverage. Review and update it in the same change for every code, configuration, schema, permission, route, endpoint, extension, integration, workflow, or user-facing behavior change. Add rows for new functionality, remove or mark retired functionality, and keep implementation paths and exact test-flow references current. Every row must state whether it has targeted automated coverage, manual-only coverage, partial coverage, or no dedicated automated test; do not claim coverage merely because a page loads incidentally.
+
 ## Project structure:
 1. src/frontend - contains a NuxtJS/Vue/DaisyUI/Blokkli frontend
 2. src/directus - contains exports of the current directus config in .yaml files using the import/export scripts from src/directus/cli

@@ -486,6 +486,53 @@ const captureMeasureSnapshots = async (
   }
 };
 
+const syncCreatorVerified = async (
+  meta: any,
+  { services, getSchema, logger }: ServiceContext,
+): Promise<void> => {
+  if (meta?.collection !== 'directus_users') return;
+  if (!payloadHasAnyField(meta.payload, ['verified'])) return;
+
+  const verified = meta.payload.verified;
+  if (typeof verified !== 'boolean') return;
+
+  const userIds = getEventKeys(meta);
+  if (!userIds.length) return;
+
+  const schema = await getSchema();
+  const localteamService = new services.ItemsService('localteams', {
+    schema,
+    accountability: adminAccountability,
+  });
+  const municipalityService = new services.ItemsService('municipalities', {
+    schema,
+    accountability: adminAccountability,
+  });
+
+  const localteams = await localteamService.readByQuery({
+    filter: { admin_id: { _in: userIds } },
+    fields: ['id'],
+    limit: -1,
+  }) as Array<{ id: number | string }>;
+  if (!localteams.length) return;
+
+  const localteamIds = localteams.map((localteam) => localteam.id);
+  const municipalities = await municipalityService.readByQuery({
+    filter: { localteam_id: { _in: localteamIds } },
+    fields: ['id'],
+    limit: -1,
+  }) as Array<{ id: number | string }>;
+
+  for (const municipality of municipalities) {
+    await municipalityService.updateOne(municipality.id, { creator_verified: verified });
+  }
+
+  logger.info(
+    `[syncCreatorVerified] Set creator_verified=${verified} for ${municipalities.length} municipality(s) `
+      + 'managed by updated user(s).',
+  );
+};
+
 /** ---------- Event Handlers ---------- **/
 
 const handleMunicipalityCreated = async (meta: any, ctx: ServiceContext): Promise<void> => {
@@ -792,5 +839,14 @@ export default (
         return handleMeasuresDeleted(meta, ctx);
       }
     })
+  );
+
+  // directus_users emits users.update, not items.update. Keep this separate
+  // from publication authorization: creator_verified only controls previews.
+  action(
+    'users.update',
+    safeCall('users.update', extensionContext, async (meta, ctx) => {
+      await syncCreatorVerified(meta, ctx);
+    }),
   );
 };

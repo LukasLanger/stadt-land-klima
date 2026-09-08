@@ -1045,6 +1045,46 @@ export async function runRatingWahlcheckFlow(
     }
   });
 
+  await runner.step('Ratings: municipality preview follows the localteam admin verification', async () => {
+    await fixture.admin.updateUser(fixture.localteamAdmin.id, { verified: true });
+    const verifiedMunicipality = await waitFor(
+      'municipality creator_verified=true after localteam admin verification',
+      async () => {
+        const municipality = await fixture.admin.readItem<{ creator_verified?: boolean | null }>(
+          'municipalities',
+          fixture.municipality.id,
+          ['creator_verified'],
+        );
+        return municipality.creator_verified === true ? municipality : false;
+      },
+      { timeoutMs: 15_000, intervalMs: 500 },
+    );
+    assertEqual(
+      verifiedMunicipality.creator_verified,
+      true,
+      'Verifying the localteam admin must unlock the municipality preview state',
+    );
+
+    await fixture.admin.updateUser(fixture.localteamAdmin.id, { verified: false });
+    const resetMunicipality = await waitFor(
+      'municipality creator_verified=false after localteam admin de-verification',
+      async () => {
+        const municipality = await fixture.admin.readItem<{ creator_verified?: boolean | null }>(
+          'municipalities',
+          fixture.municipality.id,
+          ['creator_verified'],
+        );
+        return municipality.creator_verified === false ? municipality : false;
+      },
+      { timeoutMs: 15_000, intervalMs: 500 },
+    );
+    assertEqual(
+      resetMunicipality.creator_verified,
+      false,
+      'Removing the localteam admin verification must relock the municipality preview state',
+    );
+  });
+
   await runner.step('Ratings: unverified localteam member cannot publish via Directus checkbox', async () => {
     const context = await newContext(browser);
     const page = await context.newPage();
@@ -1068,6 +1108,17 @@ export async function runRatingWahlcheckFlow(
   await runner.step('Ratings: verified localteam member can publish and unpublish via Directus checkbox', async () => {
     await fixture.admin.updateUser(fixture.localteamMember.id, { verified: true });
     await fixture.refreshUserClients();
+
+    const municipality = await fixture.admin.readItem<{ creator_verified?: boolean | null }>(
+      'municipalities',
+      fixture.municipality.id,
+      ['creator_verified'],
+    );
+    assertEqual(
+      municipality.creator_verified,
+      false,
+      'A verified person must be able to publish even when the localteam admin preview flag is false',
+    );
 
     const context = await newContext(browser);
     const page = await context.newPage();

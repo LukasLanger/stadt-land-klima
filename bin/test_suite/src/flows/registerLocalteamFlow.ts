@@ -1,6 +1,6 @@
 import type { Browser, Page } from 'playwright';
 import { assert, assertEqual, assertIncludes, assertNotIncludes } from '../lib/assert.js';
-import { newContext, visibleText } from '../lib/browser.js';
+import { gotoDirectusContent, loginDirectus, newContext, visibleText } from '../lib/browser.js';
 import type { DirectusClient } from '../lib/directus.js';
 import type { TestFixture } from '../lib/fixture.js';
 import type { TestRunner } from '../lib/runner.js';
@@ -16,6 +16,26 @@ interface DirectusUser {
   status?: string | null;
   verified?: boolean | null;
   role?: string | { id: string; name?: string | null };
+}
+
+interface DirectusPresentationLink {
+  icon?: string | null;
+  label?: string | null;
+  url?: string | null;
+}
+
+interface DirectusMunicipalityCollection {
+  meta?: {
+    preview_url?: string | null;
+  } | null;
+}
+
+interface DirectusMunicipalityField {
+  meta?: {
+    options?: {
+      links?: DirectusPresentationLink[];
+    } | null;
+  } | null;
 }
 
 interface Localteam {
@@ -73,6 +93,17 @@ function relationId(value: string | { id: string } | null | undefined): string |
 
 function roleName(user: DirectusUser): string | undefined | null {
   return typeof user.role === 'object' ? user.role.name : undefined;
+}
+
+function roleId(user: DirectusUser): string | null {
+  if (typeof user.role === 'string') return user.role;
+  return user.role?.id ?? null;
+}
+
+function configuredPreviewUrl(fixture: TestFixture): string {
+  const frontendBaseUrl = fixture.config.env.FRONTEND_BASE_URL?.trim().replace(/\/+$/, '');
+  assert(frontendBaseUrl, 'Backend env must define FRONTEND_BASE_URL for Directus previews');
+  return `${frontendBaseUrl}/municipalities/{{slug}}?preview={{preview_token}}`;
 }
 
 function validTestArs(runId: string, offset: number): string {
@@ -197,7 +228,18 @@ async function solveAltcha(page: Page): Promise<void> {
 async function readUserByEmail(admin: DirectusClient, email: string): Promise<DirectusUser | undefined> {
   const users = await admin.readUsers<DirectusUser>({
     filter: { email: { _eq: email } },
-    fields: ['id', 'email', 'first_name', 'last_name', 'title', 'description', 'status', 'verified', 'role.name'],
+    fields: [
+      'id',
+      'email',
+      'first_name',
+      'last_name',
+      'title',
+      'description',
+      'status',
+      'verified',
+      'role.id',
+      'role.name',
+    ],
     limit: 1,
   });
   return users[0];
@@ -387,6 +429,12 @@ export async function runRegisterLocalteamFlow(
     assertEqual(user.status, 'active', 'Register localteam must create an active Directus user');
     assertEqual(user.verified, false, 'Register localteam user must start unverified');
     assertEqual(roleName(user), 'LokalteamAdmin', 'Register localteam user must be a LokalteamAdmin');
+    assert(user.role, 'Register localteam user must have a role assigned');
+    assertEqual(
+      roleId(user),
+      fixture.roles.get('LokalteamAdmin')?.id ?? null,
+      'Register localteam user must receive the current LokalteamAdmin role id',
+    );
     assertEqual(user.first_name, 'Automated', 'Register localteam user must keep the first name');
     assertEqual(user.last_name, 'Register', 'Register localteam user must keep the last name');
     assertEqual(
@@ -429,6 +477,83 @@ export async function runRegisterLocalteamFlow(
       'Created municipality must link to the new localteam',
     );
     assert(municipality.preview_token, 'Created municipality must get a preview token');
+  });
+
+  await runner.step('Register localteam: Directus preview uses the configured frontend URL', async () => {
+    const expectedTemplate = configuredPreviewUrl(fixture);
+    const collection = await fixture.admin.request<DirectusMunicipalityCollection>(
+      'GET',
+      '/collections/municipalities',
+    );
+    assertEqual(
+      collection.meta?.preview_url ?? null,
+      expectedTemplate,
+      'Municipality collection preview must use FRONTEND_BASE_URL',
+    );
+
+    const field = await fixture.admin.request<DirectusMunicipalityField>(
+      'GET',
+      '/fields/municipalities/links-g1sxxi',
+    );
+    const previewLink = field.meta?.options?.links?.find(
+      (link) => link.icon === 'preview' || link.label === '$t:municipalities.preview',
+    );
+    assert(previewLink, 'Municipality presentation links must include the preview link');
+    assertEqual(
+      previewLink.url ?? null,
+      expectedTemplate,
+      'Municipality presentation preview must use FRONTEND_BASE_URL',
+    );
+
+    assert(fixture.municipality.slug, 'Fixture municipality must have a slug for preview link testing');
+    assert(fixture.municipality.preview_token, 'Fixture municipality must have a preview token for preview link testing');
+    const expectedOrigin = new URL(expectedTemplate).origin;
+    const expectedPath = `/municipalities/${fixture.municipality.slug}`;
+    const expectedToken = fixture.municipality.preview_token;
+
+    const context = await newContext(browser);
+    const page = await context.newPage();
+    try {
+      await loginDirectus(
+        page,
+        fixture.config.backendUrl,
+        fixture.localteamMember.email,
+        fixture.localteamMember.password,
+      );
+      await gotoDirectusContent(page, fixture.config.backendUrl, 'municipalities', fixture.municipality.id);
+
+      const previewLinkElement = page.locator('a[href*="/municipalities/"][href*="preview="]').first();
+      await previewLinkElement.waitFor({ state: 'visible', timeout: 20_000 });
+      const href = await previewLinkElement.getAttribute('href');
+      assert(href, 'Directus municipality preview must render as a link');
+      const resolvedHref = new URL(href, fixture.config.backendUrl);
+      assertEqual(resolvedHref.origin, expectedOrigin, 'Directus preview link must use the configured frontend host');
+      assertEqual(resolvedHref.pathname, expectedPath, 'Directus preview link must use the municipality slug');
+      assertEqual(
+        resolvedHref.searchParams.get('preview'),
+        expectedToken,
+        'Directus preview link must preserve the municipality preview token',
+      );
+
+      if ((await previewLinkElement.getAttribute('target')) === '_blank') {
+        const popupPromise = context.waitForEvent('page', { timeout: 20_000 });
+        await previewLinkElement.click();
+        const previewPage = await popupPromise;
+        await previewPage.waitForLoadState('domcontentloaded');
+        assertEqual(new URL(previewPage.url()).origin, expectedOrigin, 'Preview click must open the configured frontend');
+        await previewPage.close();
+      } else {
+        await Promise.all([
+          page.waitForURL(
+            (url) => url.origin === expectedOrigin && url.pathname === expectedPath,
+            { timeout: 20_000 },
+          ),
+          previewLinkElement.click(),
+        ]);
+      }
+    } finally {
+      await context.close();
+    }
   });
 
   await runner.step('Register localteam: frontend page offers contact flow for an existing localteam', async () => {
