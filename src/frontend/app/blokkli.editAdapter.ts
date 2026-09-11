@@ -6,6 +6,7 @@
  */
 
 import { defineBlokkliEditAdapter } from '#blokkli/adapter'
+import { emitMessage } from '#blokkli/helpers/eventBus'
 import type {
   MappedState,
   MutationItem,
@@ -69,7 +70,11 @@ type StoredDraft = {
 export default defineBlokkliEditAdapter<AdapterState>((ctx) => {
   const { $directus, $t } = useNuxtApp()
   const config = useRuntimeConfig()
-  const { isAuthenticated, getAuthenticatedClient, user } = useAuth()
+  const { isAuthenticated, getAuthenticatedClient, user, initialize } = useAuth()
+  // Capture Nuxt context before asynchronous adapter callbacks run.
+  const pageData = useNuxtData<FieldListItem[]>(
+    getBlokkliDataKey(ctx.value.entityType, ctx.value.entityUuid),
+  )
 
   function getClient() {
     if (isAuthenticated.value) {
@@ -118,6 +123,8 @@ export default defineBlokkliEditAdapter<AdapterState>((ctx) => {
   let editStateDateUpdated = 0
   let draftSaveTimer: ReturnType<typeof setTimeout> | null = null
   let draftWriteQueue: Promise<void> = Promise.resolve()
+  let autosaveErrorShown = false
+  let previewPollingStarted = false
 
   function cloneBlocks(blocks: FieldListItem[]): FieldListItem[] {
     return JSON.parse(JSON.stringify(blocks))
@@ -210,6 +217,7 @@ export default defineBlokkliEditAdapter<AdapterState>((ctx) => {
           base_revision: snapshot.baseRevision,
         })
         editStateDateUpdated = Date.now()
+        autosaveErrorShown = false
       })
     return draftWriteQueue
   }
@@ -224,6 +232,10 @@ export default defineBlokkliEditAdapter<AdapterState>((ctx) => {
       draftSaveTimer = null
       void persistDraftNow().catch((err) => {
         console.error('[blokkli] Autosave failed; the in-browser draft is retained:', err)
+        if (!autosaveErrorShown) {
+          emitMessage($t('blokkli.editor.autosave_error'), 'error')
+          autosaveErrorShown = true
+        }
       })
     }, 750)
   }
@@ -589,6 +601,7 @@ export default defineBlokkliEditAdapter<AdapterState>((ctx) => {
      * Load state from Directus. Resets mutation tracking.
      */
     async loadState(): Promise<AdapterState> {
+      await initialize()
       mutationIndex = -1
       mutationItems.length = 0
       await loadBlocksFromDirectus()
@@ -614,6 +627,9 @@ export default defineBlokkliEditAdapter<AdapterState>((ctx) => {
      * Includes mutation tracking for publish/discard/undo UI.
      */
     mapState(s: AdapterState): MappedState {
+      // blökkli compares the previous mapped fields to the next snapshot. Sharing
+      // nested props mutates the previous snapshot too, hiding edits from Vue.
+      const blocks = cloneBlocks(s.blocks)
       // Collect mutated options for all blocks (including all nested fields)
       function collectOptions(list: FieldListItem[], acc: Record<string, Record<string, any>>) {
         for (const block of list) {
@@ -666,15 +682,15 @@ export default defineBlokkliEditAdapter<AdapterState>((ctx) => {
         currentUserIsOwner: isCurrentUserOwner,
         ownerName: currentOwnerName,
         mutatedState: {
-          mutatedOptions: collectOptions(s.blocks, {}),
+          mutatedOptions: collectOptions(blocks, {}),
           fields: [
             {
               name: 'content',
               entityType: ctx.value.entityType,
               entityUuid: ctx.value.entityUuid,
-              list: s.blocks.map((b) => ({ ...b })),
+              list: blocks,
             },
-            ...collectContainerFields(s.blocks),
+            ...collectContainerFields(blocks),
           ],
         },
         entity: {
@@ -1020,8 +1036,6 @@ export default defineBlokkliEditAdapter<AdapterState>((ctx) => {
 
       // Do not immediately re-fetch through a possibly stale shared API cache.
       // Put the transaction's canonical response directly into this page's data.
-      const dataKey = getBlokkliDataKey(ctx.value.entityType, ctx.value.entityUuid)
-      const pageData = useNuxtData<FieldListItem[]>(dataKey)
       pageData.data.value = cloneBlocks(state.blocks)
       clearLocalDraft()
 
@@ -1092,8 +1106,32 @@ export default defineBlokkliEditAdapter<AdapterState>((ctx) => {
       return { success: true as const, state }
     },
 
-    getLastChanged() {
-      return Promise.resolve(editStateDateUpdated)
+    async getLastChanged() {
+      // Blökkli uses its first poll only as a baseline. Start with the loaded
+      // snapshot so an edit made just after preview opened is not missed.
+      if (!previewPollingStarted) {
+        previewPollingStarted = true
+        return editStateDateUpdated || 1
+      }
+      // Preview has its own adapter instance; its in-memory timestamp never
+      // changes when another tab saves. Read both recovery stores instead.
+      const localDate = Date.parse(loadLocalDraft()?.updatedAt || '') || 0
+      try {
+        const records = await getClient().request(
+          (readItems as Function)('edit_states', {
+            filter: {
+              entity_type: { _eq: ctx.value.entityType },
+              entity_uuid: { _eq: ctx.value.entityUuid },
+            },
+            fields: ['date_updated'],
+            limit: 1,
+          }),
+        )
+        return Math.max(localDate, Date.parse(records?.[0]?.date_updated || '') || 0, 1)
+      } catch (err) {
+        console.warn('[blokkli] Failed to check preview draft timestamp:', err)
+        return Math.max(localDate, editStateDateUpdated, 1)
+      }
     },
 
     getEditableFieldConfig(): Promise<EditableFieldConfig[]> {

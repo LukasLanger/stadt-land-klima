@@ -19,6 +19,19 @@ Or call the suite directly:
 
 `run_tests.sh` installs local npm dependencies on first run and launches the TypeScript runner with `tsx`.
 
+The focused Blökkli browser regression runs separately against the development
+stack (`localhost:8080` and `localhost:8081`):
+
+```bash
+cd bin/test_suite
+npm run test:blokkli
+```
+
+It checks inline edits, autosave failure feedback, local draft preview, updates
+in an open preview, failed publication, server draft recovery, publication,
+and server-rendered content after reload. Its disposable page, blocks and edit
+state are removed afterwards. It uses the admin credentials in `src/directus/.env`.
+
 ## What It Covers
 
 The current suite executes:

@@ -1,5 +1,5 @@
 <template>
-  <BlokkliProvider
+  <BlokkliPageProvider
     v-if="item"
     entity-type="news_items"
     entity-bundle="news_item"
@@ -131,7 +131,7 @@
         </div><!-- /.max-w-3xl -->
       </div><!-- /.flex -->
     </template>
-  </BlokkliProvider>
+  </BlokkliPageProvider>
 
   <p v-else-if="authChecked" class="prose py-8">
     {{ $t('page_not_found') }}

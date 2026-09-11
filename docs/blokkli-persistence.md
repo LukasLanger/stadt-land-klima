@@ -87,6 +87,32 @@ Slug und Seitentitel auf. Seine Block-Dokument-IDs verwenden nun das von
 Meilisearch erlaubte Format `block_<uuid>`. Der alte Doppelpunkt in `block:<uuid>`
 führte dazu, dass Meilisearch die Aktualisierungsaufträge ablehnte.
 
+## Browser-Vorschau und Fehleranzeige
+
+`BlokkliPageProvider.vue` startet die Vorschau erst im Browser, nachdem die
+Authentifizierung initialisiert wurde. Ein serverseitiger Vorschauaufruf kann
+weder die Browser-Anmeldung noch den lokalen Entwurf lesen. Normale Seiten
+werden weiterhin serverseitig gerendert.
+
+Der Adapter gibt unabhängige Snapshots an Blökkli zurück, damit dessen
+Änderungsvergleich auch Änderungen an verschachtelten Props erkennt. Die
+Vorschau prüft die Zeitstempel aus Directus und dem lokalen Entwurf, statt nur
+den unveränderten Zeitstempel ihrer eigenen Adapter-Instanz abzufragen.
+
+Fehler beim automatischen Speichern erscheinen im Editor. Der Nuxt-Datensatz
+für die veröffentlichte Seite wird bereits beim Erstellen des Adapters
+referenziert, damit der Publish-Callback ihn nach den asynchronen Requests
+ohne verlorenen Nuxt-Kontext aktualisieren kann.
+
+Überschriften rendern ihren bearbeitbaren HTML-Inhalt in einem `span` innerhalb
+des dynamischen Heading-Tags. Direktes `v-html` auf dem dynamischen Tag erzeugte
+beim serverseitigen Rendern eine leere Überschrift, obwohl der gespeicherte
+Text in Directus vorhanden war.
+
+Der gezielte Browsertest läuft aus `bin/test_suite` mit
+`npm run test:blokkli`. Er verwendet eine eigene
+Testseite und entfernt sie einschließlich Blöcken und Entwurf anschließend.
+
 ## Deployment
 
 Die Migration darf wegen der bestehenden Blockdaten nicht ausgelassen werden.

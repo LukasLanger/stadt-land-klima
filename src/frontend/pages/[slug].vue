@@ -1,5 +1,5 @@
 <template>
-  <BlokkliProvider
+  <BlokkliPageProvider
     v-if="page"
     entity-type="pages"
     entity-bundle="page"
@@ -29,7 +29,7 @@
         </template>
       </article>
     </template>
-  </BlokkliProvider>
+  </BlokkliPageProvider>
 
   <p v-else class="prose py-8">
     {{ $t("page_not_found") }}

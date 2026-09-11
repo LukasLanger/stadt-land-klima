@@ -1,6 +1,6 @@
 <template>
   <div class="w-full">
-    <BlokkliProvider
+    <BlokkliPageProvider
       v-if="page"
       entity-type="pages"
       entity-bundle="page"
@@ -24,7 +24,7 @@
           />
         </article>
       </template>
-    </BlokkliProvider>
+    </BlokkliPageProvider>
     <p v-else class="prose px-4 py-8 max-w-4xl mx-auto w-full self-center">
       {{ $t("page_not_found") }}
     </p>

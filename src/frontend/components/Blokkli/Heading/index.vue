@@ -6,11 +6,11 @@
   >
     <component
       :is="headingTag"
-      v-blokkli-editable:text
       class="blokkli-block-heading whitespace-pre-line"
       :class="[colorClass, sizeClass, weightClass]"
-      v-html="props.text || ''"
-    />
+    >
+      <span v-blokkli-editable:text v-html="props.text || ''" />
+    </component>
   </div>
 </template>
 
